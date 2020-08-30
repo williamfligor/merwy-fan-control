@@ -1,5 +1,12 @@
+#include <ESP8266WiFi.h>
+#include <WiFiClient.h>
+#include <ESP8266WebServer.h>
+#include <ESP8266mDNS.h>
+
 #include <ELECHOUSE_CC1101_SRC_DRV.h>
 #include <RCSwitch.h>
+
+#include "options.h"
 
 // Set receive and transmit pin numbers (GDO0 and GDO2)
 #define GDO0_TX D1 // use GDO0 for TX & RX
@@ -15,7 +22,13 @@
 #define RF_REPEATS  8
 
 RCSwitch mySwitch = RCSwitch();
-static const RCSwitch::Protocol proto = { 386, { 35, 1 }, { 1, 2 }, { 2, 1 }, true };
+
+const char* ssid     = STASSID;
+const char* password = STAPSK;
+
+ESP8266WebServer server(80);
+
+const int led = LED_BUILTIN;
 
 void sendState(int fanNum, bool toggleLight, bool setFan, int fanSpeed) {
     ELECHOUSE_cc1101.SetTx();
@@ -64,20 +77,72 @@ void sendState(int fanNum, bool toggleLight, bool setFan, int fanSpeed) {
     mySwitch.enableReceive(GDO0_TX);
 }
 
-void sendCmds(int fanNum, bool toggleLight, bool setFan, int fanSpeed)
-{
-    if (toggleLight) {
-        sendState(fanNum, true, false, 0);
+int getFanId() {
+    if (server.arg("id") == "") {
+        return -1;
     }
-
-    if (setFan) {
-        sendState(fanNum, false, true, fanSpeed);
-    }
+    
+    return server.arg("id").toInt();
 }
 
-void setup() {
+int getFanSpeed() {
+    if (server.arg("speed") == "") {
+        return -1;
+    }
+    
+    return server.arg("speed").toInt();
+}
+
+void handleLight() {
+    int fanId = getFanId();
+    if (fanId < 0) {
+        server.send(400, "text/plain", "id parameter missing");
+        return;
+    }
+
+    if (fanId > 0b1111) {
+        server.send(400, "text/plain", "Invalid id");
+        return;
+    }
+    
+    sendState(fanId, true, false, 0);
+    
+    server.send(200, "text/plain", "ok");
+}
+
+void handleFan() {
+    int fanId = getFanId();
+    if (fanId < 0) {
+        server.send(400, "text/plain", "id parameter missing");
+        return;
+    }
+
+    if (fanId > 0b1111) {
+        server.send(400, "text/plain", "Invalid id");
+        return;
+    }
+
+    int fanSpeed = getFanSpeed();
+    if (fanSpeed < 0) {
+        server.send(400, "text/plain", "speed parameter missing");
+        return;
+    }
+
+    if (fanSpeed > 3) {
+        server.send(400, "text/plain", "Invalid speed");
+        return;
+    }
+    
+    sendState(fanId, false, true, fanSpeed);
+    
+    server.send(200, "text/plain", "ok");
+}
+
+void setup(void) {
     Serial.begin(115200);
 
+    Serial.println("Radio initializing..");
+  
     ELECHOUSE_cc1101.setGDO(GDO0_TX, GDO2_RX); 
     ELECHOUSE_cc1101.Init();
     ELECHOUSE_cc1101.setMHZ(FREQUENCY);
@@ -85,14 +150,40 @@ void setup() {
     ELECHOUSE_cc1101.SetRx();
     mySwitch.enableReceive(GDO0_TX);
 
-    Serial.println("Setup");
+    Serial.println("Radio initialized..");
 
-    sendState(0, false, true, 3);
-    sendState(4, true, true, 3);
-    sendState(8, true, true, 3);
+    Serial.println("Wifi connecting..");
+
+    WiFi.begin(ssid, password);
+    Serial.println("");
+    
+    // Wait for connection
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+
+    Serial.println("");
+    Serial.println("Wifi connected");
+    Serial.print("Connected to ");
+    Serial.println(ssid);
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+    
+    if (MDNS.begin("esp8266")) {
+        Serial.println("MDNS responder started");
+    }
+    
+    server.on("/fan", handleFan);
+    server.on("/light", handleLight);
+    
+    server.begin();
+    Serial.println("HTTP server started"); 
 }
 
-void loop() {
+void loop(void) {
+    server.handleClient();
+
     if (mySwitch.available()) {
         unsigned long value =  mySwitch.getReceivedValue();
         unsigned int prot = mySwitch.getReceivedProtocol();
